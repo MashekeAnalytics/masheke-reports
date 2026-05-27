@@ -1,0 +1,203 @@
+---
+title: "Davidson County Voter Analytics | Masheke Analytics"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    theme: flatly
+    social: menu
+    source_code: embed
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(dplyr)
+library(tidyr)
+library(sf)
+library(tigris)
+library(leaflet)
+library(plotly)
+library(DT)
+library(htmltools)
+library(scales)
+
+options(tigris_use_cache = TRUE)
+```
+
+```{r data-processing, include=FALSE}
+# --- DATA PROCESSING ---
+
+dcvoter <- read.table(
+  "C:/Users/richa/OneDrive/Desktop/ResearchData/PoliticalData/dcvoter.txt",
+  header = TRUE,
+  sep = "\t",
+  stringsAsFactors = FALSE
+)
+
+status_2 <- dcvoter %>% 
+  filter(voter_status_desc == "ACTIVE") %>% 
+  select(voter_reg_num, ncid, zip_code, party_cd)
+
+voter_counts <- status_2 %>%
+  # 1. Count by zip and party
+  count(zip_code, party_cd) %>%
+  
+  # 2. Pivot to wide format
+  pivot_wider(names_from = party_cd, values_from = n, values_fill = 0) %>%
+  
+  # 3. Clean up the zip code column first
+  filter(!is.na(zip_code) & zip_code != "NA") %>%
+  mutate(zip_code = as.character(zip_code)) %>%
+  
+  # 4. Safely check and add core party columns if they are missing from the raw slice
+  mutate(
+    DEM = if ("DEM" %in% names(.)) DEM else 0,
+    REP = if ("REP" %in% names(.)) REP else 0,
+    UNA = if ("UNA" %in% names(.)) UNA else 0
+  ) %>%
+  
+  # 5. FIXED: Explicitly sum only the columns you want
+  mutate(
+    total_active_voters = DEM + REP + UNA
+  )
+
+# Spatial Data
+nc_zctas <- zctas(
+  state = "NC",
+  year = 2000,
+  cb = TRUE,
+  class = "sf"
+)
+
+davidson_boundary <- counties(
+  state = "NC",
+  cb = TRUE,
+  class = "sf"
+) %>%
+  filter(NAME == "Davidson")
+
+davidson_map_data <- nc_zctas %>%
+  st_filter(davidson_boundary)
+
+final_map_data <- davidson_map_data %>%
+  inner_join(voter_counts, by = c("ZCTA" = "zip_code"))
+
+total_v <- sum(final_map_data$total_active_voters, na.rm = TRUE)
+
+p_totals <- colSums(
+  st_drop_geometry(final_map_data)[, c("DEM", "REP", "UNA")],
+  na.rm = TRUE
+)
+
+p_df <- data.frame(
+  Party = names(p_totals),
+  Count = as.numeric(p_totals)
+)
+```
+
+Voter Overview
+=====================================
+
+Column {data-width=250 .sidebar}
+-------------------------------------
+
+### Executive Summary
+
+Based on current active voter registration data for Davidson County:
+
+**Party Dominance:** Republican registration leads across much of the county.
+
+**Key Hubs:** ZIP codes 27295 and 27360 represent major concentrations of active voters.
+
+**Unaffiliated Growth:** Unaffiliated voters are a critical segment and may influence local election outcomes.
+
+<br>
+
+**Produced by Masheke Analytics**
+
+Column {data-width=750}
+-------------------------------------
+
+### Interactive Voter Density Map
+
+```{r voter-map}
+pal <- leaflet::colorNumeric(
+  palette = "YlOrRd",
+  domain = final_map_data$total_active_voters
+)
+
+leaflet(data = final_map_data) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~pal(total_active_voters),
+    weight = 1,
+    color = "white",
+    fillOpacity = 0.7,
+    highlightOptions = highlightOptions(
+      weight = 3,
+      color = "#666",
+      bringToFront = TRUE
+    ),
+    label = lapply(1:nrow(final_map_data), function(i) {
+      HTML(paste0(
+        "<b>ZIP Code: </b>", final_map_data$ZCTA[i], "<br>",
+        "<b>Total Active Voters: </b>", format(final_map_data$total_active_voters[i], big.mark = ","), "<br>",
+        "<b>DEM: </b>", format(final_map_data$DEM[i], big.mark = ","), "<br>",
+        "<b>REP: </b>", format(final_map_data$REP[i], big.mark = ","), "<br>",
+        "<b>UNA: </b>", format(final_map_data$UNA[i], big.mark = ",")
+      ))
+    }),
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "13px",
+      direction = "auto"
+    )
+  ) %>%
+  addLegend(
+    pal = pal,
+    values = ~total_active_voters,
+    title = "Active Voters",
+    position = "bottomright"
+  )
+```
+
+Column {data-width=350}
+-------------------------------------
+
+### Total Active Voters
+
+```{r total-active-voters}
+valueBox(
+  format(total_v, big.mark = ","),
+  icon = "fa-users",
+  color = "info"
+)
+```
+
+### County-Wide Party Distribution
+
+```{r party-distribution}
+plot_ly(
+  p_df,
+  x = ~Party,
+  y = ~Count,
+  type = "bar",
+  marker = list(color = c("#1F77B4", "#D62728", "#A9A9A9"))
+) %>%
+  layout(
+    xaxis = list(title = ""),
+    yaxis = list(title = "Total Count")
+  )
+```
+
+### Searchable Data by ZIP
+
+```{r zip-table}
+voter_counts %>%
+  select(zip_code, total_active_voters, DEM, REP, UNA) %>%
+  arrange(desc(total_active_voters)) %>%
+  datatable(
+    options = list(pageLength = 6, dom = "tp"),
+    rownames = FALSE
+  )
+```
