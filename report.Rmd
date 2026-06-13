@@ -1,0 +1,679 @@
+---
+title: "Davidson County Voter Analytics | Masheke Analytics"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    theme: flatly
+    social: menu
+    source_code: false
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(dplyr)
+library(tidyr)
+library(sf)
+library(tigris)
+library(leaflet)
+library(plotly)
+library(DT)
+library(htmltools)
+library(scales)
+
+options(tigris_use_cache = TRUE)
+```
+
+```{r data-processing, include=FALSE}
+
+dcvoter <- read.table(
+  "C:/Users/richa/OneDrive/Desktop/ResearchData/PoliticalData/dcvoter.txt",
+  header = TRUE,
+  sep = "\t",
+  stringsAsFactors = FALSE
+)
+
+status_2 <- dcvoter %>% 
+  filter(voter_status_desc == "ACTIVE") %>% 
+  select(voter_reg_num, ncid, zip_code, party_cd, age_at_year_end,
+         gender_code,race_code,precinct_desc, ward_desc,cong_dist_abbrv, mail_city)
+
+voter_counts <- status_2 %>%
+  count(zip_code, party_cd, name = "n") %>%
+  filter(!is.na(zip_code), zip_code != "NA") %>%
+  mutate(zip_code = as.character(zip_code)) %>%
+  pivot_wider(
+    names_from = party_cd,
+    values_from = n,
+    values_fill = list(n = 0)
+  )
+
+needed_cols <- c("DEM", "REP", "UNA", "LIB", "GRE")
+
+for (col in needed_cols) {
+  if (!col %in% names(voter_counts)) {
+    voter_counts[[col]] <- 0
+  }
+}
+
+voter_counts <- voter_counts %>%
+  mutate(
+    total_active_voters = DEM + REP + UNA + LIB + GRE,
+    dem_share = DEM / total_active_voters,
+    rep_share = REP / total_active_voters,
+    una_share = UNA / total_active_voters,
+    lib_share = LIB / total_active_voters,
+    gre_share = GRE / total_active_voters,
+    leading_party = case_when(
+      DEM >= REP & DEM >= UNA & DEM >= LIB & DEM >= GRE ~ "DEM",
+      REP >= DEM & REP >= UNA & REP >= LIB & REP >= GRE ~ "REP",
+      UNA >= DEM & UNA >= REP & UNA >= LIB & UNA >= GRE ~ "UNA",
+      LIB >= DEM & LIB >= REP & LIB >= UNA & LIB >= GRE ~ "LIB",
+      GRE >= DEM & GRE >= REP & GRE >= UNA & GRE >= LIB ~ "GRE",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  rowwise() %>%
+  mutate(
+    party_gap = {
+      vals <- sort(c(DEM, REP, UNA, LIB, GRE), decreasing = TRUE)
+      (vals[1] - vals[2]) / total_active_voters
+    }
+  ) %>%
+  ungroup()
+
+nc_zctas <- zctas(
+  state = "NC",
+  year = 2000,
+  cb = TRUE,
+  class = "sf"
+)
+
+davidson_boundary <- counties(
+  state = "NC",
+  cb = TRUE,
+  class = "sf"
+) %>%
+  filter(NAME == "Davidson")
+
+davidson_map_data <- nc_zctas %>%
+  st_filter(davidson_boundary)
+
+final_map_data <- davidson_map_data %>%
+  inner_join(voter_counts, by = c("ZCTA" = "zip_code"))
+
+total_v <- sum(final_map_data$total_active_voters, na.rm = TRUE)
+
+p_totals <- colSums(
+  st_drop_geometry(final_map_data)[, c("DEM", "REP", "UNA", "LIB", "GRE")],
+  na.rm = TRUE
+)
+
+p_df <- data.frame(
+  Party = names(p_totals),
+  Count = as.numeric(p_totals)
+)
+```
+
+Voter Overview
+=====================================
+
+Column {data-width=250 .sidebar}
+-------------------------------------
+
+### Executive Summary
+
+Based on current active voter registration data for Davidson County:
+
+**Party Dominance:** Republican registration leads across much of the county.
+
+**Key Hubs:** ZIP codes 27295 and 27360 represent major concentrations of active voters.
+
+**Unaffiliated Growth:** Unaffiliated voters are a critical segment and may influence local election outcomes.
+
+<br>
+
+**Produced by Masheke Analytics**
+
+Column {data-width=750}
+-------------------------------------
+
+### Interactive Voter Density Map
+
+```{r voter-map}
+pal <- leaflet::colorNumeric(
+  palette = "YlOrRd",
+  domain = final_map_data$total_active_voters
+)
+
+leaflet(data = final_map_data) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~pal(total_active_voters),
+    weight = 1,
+    color = "white",
+    fillOpacity = 0.7,
+    highlightOptions = highlightOptions(
+      weight = 3,
+      color = "#666",
+      bringToFront = TRUE
+    ),
+    label = lapply(1:nrow(final_map_data), function(i) {
+      HTML(paste0(
+        "<b>ZIP Code: </b>", final_map_data$ZCTA[i], "<br>",
+        "<b>Total Active Voters: </b>", format(final_map_data$total_active_voters[i], big.mark = ","), "<br>",
+        "<b>DEM: </b>", format(final_map_data$DEM[i], big.mark = ","), "<br>",
+        "<b>REP: </b>", format(final_map_data$REP[i], big.mark = ","), "<br>",
+        "<b>UNA: </b>", format(final_map_data$UNA[i], big.mark = ","), "<br>",
+        "<b>LIB: </b>", format(final_map_data$LIB[i], big.mark = ","), "<br>",
+        "<b>GRE: </b>", format(final_map_data$GRE[i], big.mark = ",")
+      ))
+    }),
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "13px",
+      direction = "auto"
+    )
+  ) %>%
+  addLegend(
+    pal = pal,
+    values = ~total_active_voters,
+    title = "Active Voters",
+    position = "bottomright"
+  )
+```
+
+Column {data-width=350}
+-------------------------------------
+
+### Total Active Voters
+
+```{r total-active-voters}
+valueBox(
+  format(total_v, big.mark = ","),
+  icon = "fa-users",
+  color = "info"
+)
+```
+
+### County-Wide Party Distribution
+
+```{r party-distribution}
+plot_ly(
+  p_df,
+  x = ~Party,
+  y = ~Count,
+  type = "bar"
+) %>%
+  layout(
+    xaxis = list(title = ""),
+    yaxis = list(title = "Total Count")
+  )
+```
+
+### Searchable Data by ZIP
+
+```{r zip-table}
+voter_counts %>%
+  select(zip_code, total_active_voters, DEM, REP, UNA, LIB, GRE) %>%
+  arrange(desc(total_active_voters)) %>%
+  datatable(
+    options = list(pageLength = 6, dom = "tp"),
+    rownames = FALSE
+  )
+```
+
+Voter Deep Dive
+=====================================
+
+Column {data-width=500}
+-------------------------------------
+
+### Party Share by ZIP
+
+```{r party-share}
+voter_counts %>%
+  select(zip_code, dem_share, rep_share, una_share) %>%
+  pivot_longer(
+    cols = c(dem_share, rep_share, una_share),
+    names_to = "party",
+    values_to = "share"
+  ) %>%
+  mutate(
+    party = recode(
+      party,
+      dem_share = "DEM",
+      rep_share = "REP",
+      una_share = "UNA"
+    )
+  ) %>%
+  plot_ly(
+    x = ~zip_code,
+    y = ~share,
+    color = ~party,
+    type = "bar"
+  ) %>%
+  layout(
+    barmode = "stack",
+    yaxis = list(title = "Share of Active Voters", tickformat = ".0%"),
+    xaxis = list(title = "ZIP Code")
+  )
+```
+
+### Unaffiliated Voter Concentration
+
+```{r una-concentration}
+voter_counts %>%
+  arrange(desc(UNA)) %>%
+  mutate(una_share_label = sprintf("%.1f%%", una_share * 100)) %>%
+  select(zip_code, total_active_voters, UNA, una_share_label) %>%
+  datatable(
+    colnames = c("ZIP Code", "Total Active Voters", "UNA Count", "UNA Share"),
+    options = list(pageLength = 8, dom = "tp"),
+    rownames = FALSE
+  )
+```
+
+Column {data-width=500}
+-------------------------------------
+
+### Competitive Balance by ZIP
+
+```{r competitive-balance}
+voter_counts %>%
+  arrange(party_gap) %>%
+  mutate(
+    party_gap_label = sprintf("%.1f%%", party_gap * 100)
+  ) %>%
+  plot_ly(
+    x = ~reorder(zip_code, party_gap),
+    y = ~party_gap,
+    type = "bar",
+    text = ~party_gap_label,
+    textposition = "inside",
+    insidetextanchor = "middle",
+    textangle = 0,
+    hovertemplate =
+      paste(
+        "<b>ZIP:</b> %{x}<br>",
+        "<b>Leading Party:</b> %{customdata}<br>",
+        "<b>Gap:</b> %{text}<extra></extra>"
+      ),
+    customdata = ~leading_party
+  ) %>%
+  layout(
+    xaxis = list(title = "ZIP Code"),
+    yaxis = list(
+      title = "Gap Between Top Two Parties",
+      tickformat = ".0%"
+    ),
+    showlegend = FALSE
+  )
+
+```
+
+### ZIP-Level Deep Dive Table
+
+```{r deep-dive-table}
+voter_counts %>%
+  mutate(
+  dem_share = sprintf("%.1f%%", dem_share * 100),
+  rep_share = sprintf("%.1f%%", rep_share * 100),
+  una_share = sprintf("%.1f%%", una_share * 100),
+  party_gap = sprintf("%.1f%%", party_gap * 100)
+) %>%
+  select(
+    zip_code,
+    total_active_voters,
+    DEM,
+    REP,
+    UNA,
+    dem_share,
+    rep_share,
+    una_share,
+    leading_party,
+    party_gap
+  ) %>%
+  arrange(desc(total_active_voters)) %>%
+  datatable(
+    colnames = c(
+      "ZIP Code",
+      "Total Active Voters",
+      "DEM",
+      "REP",
+      "UNA",
+      "DEM %",
+      "REP %",
+      "UNA %",
+      "Leading Party",
+      "Party Gap"
+    ),
+    options = list(pageLength = 8, dom = "tp"),
+    rownames = FALSE
+  )
+```
+
+Demographic Intelligence
+=====================================
+
+```{r demographic-data, include=FALSE}
+voter_demo <- status_2 %>%
+  mutate(
+    age_at_year_end = as.numeric(age_at_year_end),
+    zip_code = as.character(zip_code),
+    age_group = case_when(
+      age_at_year_end < 25 ~ "18-24",
+      age_at_year_end < 35 ~ "25-34",
+      age_at_year_end < 45 ~ "35-44",
+      age_at_year_end < 55 ~ "45-54",
+      age_at_year_end < 65 ~ "55-64",
+      age_at_year_end >= 65 ~ "65+",
+      TRUE ~ "Unknown"
+    ),
+    gender_label = case_when(
+      gender_code == "F" ~ "Female",
+      gender_code == "M" ~ "Male",
+      TRUE ~ "Unknown"
+    ),
+    race_label = case_when(
+      race_code == "W" ~ "White",
+      race_code == "B" ~ "Black",
+      race_code == "A" ~ "Asian",
+      race_code == "I" ~ "American Indian",
+      race_code == "M" ~ "Multiracial",
+      race_code == "O" ~ "Other",
+      TRUE ~ "Unknown"
+    )
+  )
+
+age_party <- voter_demo %>%
+  filter(party_cd %in% c("DEM", "REP", "UNA")) %>%
+  count(age_group, party_cd)
+
+gender_party <- voter_demo %>%
+  filter(party_cd %in% c("DEM", "REP", "UNA")) %>%
+  count(party_cd, gender_label)
+
+race_party <- voter_demo %>%
+  filter(party_cd %in% c("DEM", "REP", "UNA")) %>%
+  count(party_cd, race_label)
+
+zip_age <- voter_demo %>%
+  group_by(zip_code) %>%
+  summarise(
+    median_age = median(age_at_year_end, na.rm = TRUE),
+    active_voters = n(),
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(zip_code), zip_code != "NA") %>%
+  arrange(desc(active_voters))
+```
+
+Column {data-width=250 .sidebar}
+-------------------------------------
+
+### Key Demographic Insights
+
+This page profiles Davidson County active voters by age, gender, race, and ZIP-level age patterns.
+
+These views help identify:
+
+**Age Structure:** Which parties have older or younger voter bases.
+
+**Gender Mix:** How male and female voters are distributed across party registration.
+
+**Race Composition:** How race varies across major party groups.
+
+**ZIP Age Profile:** Which ZIP codes have older or younger registered voter populations.
+
+Column {data-width=500}
+-------------------------------------
+
+### Age Distribution by Party
+
+```{r age-party-chart}
+plot_ly(
+  age_party,
+  x = ~age_group,
+  y = ~n,
+  color = ~party_cd,
+  type = "bar"
+) %>%
+  layout(
+    barmode = "stack",
+    xaxis = list(title = "Age Group"),
+    yaxis = list(title = "Active Voters")
+  )
+```
+
+### Gender Composition by Party
+
+```{r gender-party-chart}
+plot_ly(
+  gender_party,
+  x = ~party_cd,
+  y = ~n,
+  color = ~gender_label,
+  type = "bar"
+) %>%
+  layout(
+    barmode = "stack",
+    xaxis = list(title = "Party"),
+    yaxis = list(title = "Active Voters")
+  )
+```
+
+Column {data-width=500}
+-------------------------------------
+
+### Race Composition by Party
+
+```{r race-party-chart}
+plot_ly(
+  race_party,
+  x = ~party_cd,
+  y = ~n,
+  color = ~race_label,
+  type = "bar"
+) %>%
+  layout(
+    barmode = "stack",
+    xaxis = list(title = "Party"),
+    yaxis = list(title = "Active Voters")
+  )
+```
+
+### Median Age by ZIP
+
+```{r median-age-zip-chart}
+plot_ly(
+  zip_age,
+  x = ~reorder(zip_code, median_age),
+  y = ~median_age,
+  type = "bar",
+  text = ~round(median_age, 1),
+  textposition = "auto"
+) %>%
+  layout(
+    xaxis = list(title = "ZIP Code"),
+    yaxis = list(title = "Median Age")
+  )
+```
+
+### ZIP Demographic Table
+
+```{r zip-demo-table}
+zip_age %>%
+  datatable(
+    colnames = c("ZIP Code", "Median Age", "Active Voters"),
+    options = list(pageLength = 8, dom = "tp"),
+    rownames = FALSE
+  )
+```
+
+
+Electoral Geography
+=====================================
+
+Column {data-width=500}
+-------------------------------------
+
+### Top Precincts by Active Voters
+
+```{r top-precincts}
+precinct_counts <- voter_demo %>%
+  filter(!is.na(precinct_desc), precinct_desc != "") %>%
+  count(precinct_desc, party_cd, name = "n") %>%
+  pivot_wider(
+    names_from = party_cd,
+    values_from = n,
+    values_fill = list(n = 0)
+  )
+
+needed_cols_geo <- c("DEM", "REP", "UNA")
+
+for (col in needed_cols_geo) {
+  if (!col %in% names(precinct_counts)) {
+    precinct_counts[[col]] <- 0
+  }
+}
+
+precinct_counts <- precinct_counts %>%
+  mutate(
+    total_active_voters = DEM + REP + UNA
+  ) %>%
+  arrange(desc(total_active_voters))
+
+precinct_counts %>%
+  select(precinct_desc, total_active_voters, DEM, REP, UNA) %>%
+  head(15) %>%
+  datatable(
+    colnames = c("Precinct", "Total Active Voters", "DEM", "REP", "UNA"),
+    options = list(pageLength = 8, dom = "tp"),
+    rownames = FALSE
+  )
+```
+
+### Precinct Party Composition
+
+```{r precinct-party-composition}
+precinct_counts %>%
+  head(12) %>%
+  select(precinct_desc, DEM, REP, UNA) %>%
+  pivot_longer(
+    cols = c(DEM, REP, UNA),
+    names_to = "party",
+    values_to = "voters"
+  ) %>%
+  plot_ly(
+    x = ~reorder(precinct_desc, voters),
+    y = ~voters,
+    color = ~party,
+    type = "bar"
+  ) %>%
+  layout(
+    barmode = "stack",
+    xaxis = list(title = "Precinct"),
+    yaxis = list(title = "Active Voters")
+  )
+```
+
+Column {data-width=500}
+-------------------------------------
+
+### Most Competitive Precincts
+
+```{r competitive-precincts}
+precinct_comp <- precinct_counts %>%
+  filter(total_active_voters > 0) %>%
+  rowwise() %>%
+  mutate(
+    leading_party = case_when(
+      DEM >= REP & DEM >= UNA ~ "DEM",
+      REP >= DEM & REP >= UNA ~ "REP",
+      UNA >= DEM & UNA >= REP ~ "UNA",
+      TRUE ~ "Other"
+    ),
+    party_gap = {
+      vals <- sort(c(DEM, REP, UNA), decreasing = TRUE)
+      (vals[1] - vals[2]) / total_active_voters
+    },
+    party_gap_label = sprintf("%.1f%%", party_gap * 100)
+  ) %>%
+  ungroup() %>%
+  arrange(party_gap)
+
+precinct_comp %>%
+  head(15) %>%
+  plot_ly(
+    x = ~reorder(precinct_desc, party_gap),
+    y = ~party_gap,
+    type = "bar",
+    text = ~party_gap_label,
+    textposition = "outside",
+    hovertemplate = paste(
+      "<b>Precinct:</b> %{x}<br>",
+      "<b>Leading Party:</b> %{customdata}<br>",
+      "<b>Gap:</b> %{text}<extra></extra>"
+    ),
+    customdata = ~leading_party
+  ) %>%
+  layout(
+    xaxis = list(title = ""),
+    yaxis = list(title = "Gap Between Top Two Parties", tickformat = ".0%"),
+    showlegend = FALSE,
+    margin = list(t = 60)
+  )
+```
+
+### Voter Geography by Mail
+
+```{r city-voter-summary}
+city_counts <- voter_demo %>%
+  filter(!is.na(mail_city), mail_city != "") %>%
+  count(mail_city, party_cd, name = "n") %>%
+  pivot_wider(
+    names_from = party_cd,
+    values_from = n,
+    values_fill = list(n = 0)
+  )
+
+for (col in needed_cols_geo) {
+  if (!col %in% names(city_counts)) {
+    city_counts[[col]] <- 0
+  }
+}
+
+city_counts <- city_counts %>%
+  mutate(
+    total_active_voters = DEM + REP + UNA
+  ) %>%
+  arrange(desc(total_active_voters))
+
+city_counts %>%
+  select(mail_city, total_active_voters, DEM, REP, UNA) %>%
+  head(15) %>%
+  datatable(
+    colnames = c("City", "Total Active Voters", "DEM", "REP", "UNA"),
+    options = list(pageLength = 8, dom = "tp"),
+    rownames = FALSE
+  )
+```
+
+```{r}
+
+dcvoter_nc <- read.table(
+  "C:/Users/richa/OneDrive/Desktop/ResearchData/PoliticalData/ncvoter29.txt",
+  header = TRUE,
+  sep = "\t",
+  stringsAsFactors = FALSE
+)
+
+```
+
+
+
+
+
+
+
